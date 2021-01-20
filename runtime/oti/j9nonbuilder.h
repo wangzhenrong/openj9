@@ -1700,8 +1700,8 @@ typedef struct J9Module {
 
 typedef struct J9Package {
 	struct J9UTF8* packageName;
-	BOOLEAN exportToAll;
-	BOOLEAN exportToAllUnnamed;
+	U_32 exportToAll;
+	U_32 exportToAllUnnamed;
 	struct J9Module* module;
 	struct J9HashTable* exportsHashTable;
 	struct J9ClassLoader* classLoader;
@@ -3671,6 +3671,7 @@ typedef struct J9JITConfig {
 	void *old_slow_jitResolveInvokeDynamic;
 	void *old_slow_jitResolveConstantDynamic;
 	void *old_slow_jitResolveHandleMethod;
+	void *old_slow_jitResolveFlattenableField;
 	void *old_slow_jitRetranslateCaller;
 	void *old_slow_jitRetranslateCallerWithPreparation;
 	void *old_slow_jitRetranslateMethod;
@@ -4916,7 +4917,9 @@ typedef struct J9VMThread {
 #define J9VMSTATE_GROW_STACK  0x30000
 #define J9VMSTATE_JNI  0x40000
 #define J9VMSTATE_JNI_FROM_JIT  0x40001
-#define J9VMSTATE_JIT_CODEGEN  0x50000
+#define J9VMSTATE_JIT  0x50000
+#define J9VMSTATE_JIT_CODEGEN  0x5FF00
+#define J9VMSTATE_JIT_OPTIMIZER  0x500FF
 #define J9VMSTATE_BCVERIFY  0x60000
 #define J9VMSTATE_RTVERIFY  0x70000
 #define J9VMSTATE_SHAREDCLASS_FIND  0x80001

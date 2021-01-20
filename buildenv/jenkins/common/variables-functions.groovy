@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2018, 2020 IBM Corp. and others
+ * Copyright (c) 2018, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -29,7 +29,7 @@ class Buildspec {
 
     /*
      * Helper function to check if a variable is a map.
-     * This is needed because .isMap() is not on the default jenkins whitelist
+     * This is needed because .isMap() is not on the default jenkins allow list
      */
     private static boolean isMap(x) {
         switch (x) {
@@ -84,7 +84,7 @@ class Buildspec {
      * else:
      *    - <name>
      *  - <parent>.getScalarField()
-     * with the parents being evaluated in the the order they are listed in the yaml file
+     * with the parents being evaluated in the order they are listed in the yaml file
      */
     public getScalarField(name, sdk_ver) {
         def sdk_key = toKey(sdk_ver)
@@ -1017,7 +1017,7 @@ def setup() {
             buildFile = pipelineFunctions
             SHAS = buildFile.get_shas(OPENJDK_REPO, OPENJDK_BRANCH, OPENJ9_REPO, OPENJ9_BRANCH, OMR_REPO, OMR_BRANCH, VENDOR_TEST_REPOS_MAP, VENDOR_TEST_BRANCHES_MAP, VENDOR_TEST_SHAS_MAP)
             BUILD_NAME = buildFile.get_build_job_name(SPEC, SDK_VERSION, BUILD_IDENTIFIER)
-            // Stash DSL file so we can quickly load it on master
+            // Stash DSL file so we can quickly load it on the Jenkins Manager node
             if (params.AUTOMATIC_GENERATION != 'false') {
                 stash includes: 'buildenv/jenkins/jobs/pipelines/Pipeline_Template.groovy', name: 'DSL'
             }
@@ -1582,6 +1582,7 @@ def download_boot_jdk(bootJDKVersion, bootJDK) {
                 unzip "\$sdkFile" -d .
                 sdkFolder=`ls -d */`
                 mv "\$sdkFolder"* ${bootJDK}/
+                rm -r "\$sdkFolder"
             else
                 gzip -cd "\$sdkFile" | tar xof - -C ${bootJDK} --strip=${dirStrip}
             fi

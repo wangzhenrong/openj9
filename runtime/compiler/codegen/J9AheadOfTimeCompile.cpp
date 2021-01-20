@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2000, 2020 IBM Corp. and others
+ * Copyright (c) 2000, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -48,14 +48,6 @@ J9::AheadOfTimeCompile::getClassChainOffset(TR_OpaqueClassBlock *classToRemember
    if (!classChainForInlinedMethod)
       self()->comp()->failCompilation<J9::ClassChainPersistenceFailure>("classChainForInlinedMethod == NULL");
    return self()->offsetInSharedCacheFromPointer(sharedCache, classChainForInlinedMethod);
-   }
-
-uint8_t *
-J9::AheadOfTimeCompile::emitClassChainOffset(uint8_t* cursor, TR_OpaqueClassBlock* classToRemember)
-   {
-   uintptr_t classChainForInlinedMethodOffsetInSharedCache = self()->getClassChainOffset(classToRemember);
-   *pointer_cast<uintptr_t *>(cursor) = classChainForInlinedMethodOffsetInSharedCache;
-   return cursor + SIZEPOINTER;
    }
 
 uintptr_t
@@ -175,24 +167,45 @@ static const char* getNameForMethodRelocation (int type)
    }
 
 uint8_t *
-J9::AheadOfTimeCompile::initializeCommonAOTRelocationHeader(TR::IteratedExternalRelocation *relocation, TR_RelocationRecord *reloRecord)
+J9::AheadOfTimeCompile::initializeAOTRelocationHeader(TR::IteratedExternalRelocation *relocation)
    {
-   uint8_t *cursor = relocation->getRelocationData();
-
-   TR::Compilation *comp = TR::comp();
+   TR::Compilation *comp = self()->comp();
    TR_RelocationRuntime *reloRuntime = comp->reloRuntime();
    TR_RelocationTarget *reloTarget = reloRuntime->reloTarget();
+
+   uint8_t *cursor         = relocation->getRelocationData();
+   uint8_t targetKind      = relocation->getTargetKind();
+   uint16_t sizeOfReloData = relocation->getSizeOfRelocationData();
+   uint8_t wideOffsets     = relocation->needsWideOffsets() ? RELOCATION_TYPE_WIDE_OFFSET : 0;
+
+   // Zero-initialize header
+   memset(cursor, 0, sizeOfReloData);
+
+   TR_RelocationRecord storage;
+   TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, targetKind, reinterpret_cast<TR_RelocationRecordBinaryTemplate *>(cursor));
+
+   reloRecord->setSize(reloTarget, sizeOfReloData);
+   reloRecord->setType(reloTarget, static_cast<TR_RelocationRecordType>(targetKind));
+   reloRecord->setFlag(reloTarget, wideOffsets);
+
+   self()->initializePlatformSpecificAOTRelocationHeader(relocation, reloTarget, reloRecord, targetKind);
+
+   cursor += self()->getSizeOfAOTRelocationHeader(static_cast<TR_RelocationRecordType>(targetKind));
+   return cursor;
+   }
+
+void
+J9::AheadOfTimeCompile::initializeCommonAOTRelocationHeader(TR::IteratedExternalRelocation *relocation,
+                                                            TR_RelocationTarget *reloTarget,
+                                                            TR_RelocationRecord *reloRecord,
+                                                            uint8_t kind)
+   {
+   TR::Compilation *comp = self()->comp();
    TR::SymbolValidationManager *symValManager = comp->getSymbolValidationManager();
    TR_J9VMBase *fej9 = comp->fej9();
    TR_SharedCache *sharedCache = fej9->sharedCache();
    uint8_t * aotMethodCodeStart = reinterpret_cast<uint8_t *>(comp->getRelocatableMethodCodeStart());
 
-   TR_ExternalRelocationTargetKind kind = relocation->getTargetKind();
-
-   // initializeCommonAOTRelocationHeader is currently in the process
-   // of becoming the canonical place to initialize the platform agnostic
-   // relocation headers; new relocation records' header should be
-   // initialized here.
    switch (kind)
       {
       case TR_ConstantPool:
@@ -232,6 +245,7 @@ J9::AheadOfTimeCompile::initializeCommonAOTRelocationHeader(TR::IteratedExternal
       case TR_ArrayCopyHelper:
       case TR_ArrayCopyToc:
       case TR_BodyInfoAddressLoad:
+      case TR_RecompQueuedFlag:
          {
          // Nothing to do
          }
@@ -1094,13 +1108,43 @@ J9::AheadOfTimeCompile::initializeCommonAOTRelocationHeader(TR::IteratedExternal
          }
          break;
 
+      case TR_BlockFrequency:
+         {
+         TR_RelocationRecordBlockFrequency *bfRecord = reinterpret_cast<TR_RelocationRecordBlockFrequency *>(reloRecord);
+         TR_RelocationRecordInformation *recordInfo = reinterpret_cast<TR_RelocationRecordInformation *>(relocation->getTargetAddress());
+         TR::SymbolReference *tempSR = reinterpret_cast<TR::SymbolReference *>(recordInfo->data1);
+         TR::StaticSymbol *staticSym = tempSR->getSymbol()->getStaticSymbol();
+
+         uint8_t flags = (uint8_t) recordInfo->data2;
+         TR_ASSERT((flags & RELOCATION_CROSS_PLATFORM_FLAGS_MASK) == 0,  "reloFlags bits overlap cross-platform flags bits\n");
+         bfRecord->setReloFlags(reloTarget, flags);
+
+         TR_PersistentProfileInfo *profileInfo = comp->getRecompilationInfo()->getProfileInfo();
+         TR_ASSERT(NULL != profileInfo, "PersistentProfileInfo not found when creating relocation record for block frequency\n");
+         if (NULL == profileInfo)
+            {
+            comp->failCompilation<J9::AOTRelocationRecordGenerationFailure>("AOT header initialization can't find profile info");
+            }
+
+         TR_BlockFrequencyInfo *blockFrequencyInfo = profileInfo->getBlockFrequencyInfo();
+         TR_ASSERT(NULL != blockFrequencyInfo, "BlockFrequencyInfo not found when creating relocation record for block frequency\n");
+         if (NULL == blockFrequencyInfo)
+            {
+            comp->failCompilation<J9::AOTRelocationRecordGenerationFailure>("AOT header initialization can't find block frequency info");
+            }
+
+         uintptr_t frequencyArrayBase = reinterpret_cast<uintptr_t>(blockFrequencyInfo->getFrequencyArrayBase());
+         uintptr_t frequencyPtr = reinterpret_cast<uintptr_t>(staticSym->getStaticAddress());
+
+         bfRecord->setFrequencyOffset(reloTarget, frequencyPtr - frequencyArrayBase);
+         }
+         break;
+
       default:
-         return cursor;
+         TR_ASSERT(false, "Unknown relo type %d!\n", kind);
+         comp->failCompilation<J9::AOTRelocationRecordGenerationFailure>("Unknown relo type %d!\n", kind);
+         break;
       }
-
-   cursor += TR_RelocationRecord::getSizeOfAOTRelocationHeader(kind);
-
-   return cursor;
    }
 
 uint8_t *
@@ -1117,14 +1161,21 @@ J9::AheadOfTimeCompile::dumpRelocationHeaderData(uint8_t *cursor, bool isVerbose
 
    int32_t offsetSize = reloRecord->wideOffsets(reloTarget) ? 4 : 2;
 
-   uint8_t *startOfOffsets = cursor + TR_RelocationRecord::getSizeOfAOTRelocationHeader(kind);
+   uint8_t *startOfOffsets = cursor + self()->getSizeOfAOTRelocationHeader(kind);
    uint8_t *endOfCurrentRecord = cursor + reloRecord->size(reloTarget);
 
    bool orderedPair = isOrderedPair(kind);
 
-   // dumpRelocationHeaderData is currently in the process of becoming the
-   // the canonical place to dump the relocation header data; new relocation
-   // records' header data should be printed here.
+   traceMsg(self()->comp(), "%16x  ", cursor);
+   traceMsg(self()->comp(), "%-5d", reloRecord->size(reloTarget));
+   traceMsg(self()->comp(), "%-31s", TR::ExternalRelocation::getName(kind));
+   traceMsg(self()->comp(), "%-6d", offsetSize);
+   traceMsg(self()->comp(), "%s", (reloRecord->flags(reloTarget) & RELOCATION_TYPE_EIP_OFFSET) ? "Rel " : "Abs ");
+
+   // Print out the correct number of spaces when no index is available
+   if (kind != TR_HelperAddress && kind != TR_AbsoluteHelperAddress)
+      traceMsg(self()->comp(), "      ");
+
    switch (kind)
       {
       case TR_ConstantPool:
@@ -1183,6 +1234,7 @@ J9::AheadOfTimeCompile::dumpRelocationHeaderData(uint8_t *cursor, bool isVerbose
       case TR_ArrayCopyHelper:
       case TR_ArrayCopyToc:
       case TR_BodyInfoAddressLoad:
+      case TR_RecompQueuedFlag:
          {
          self()->traceRelocationOffsets(startOfOffsets, offsetSize, endOfCurrentRecord, orderedPair);
          }
@@ -1922,6 +1974,18 @@ J9::AheadOfTimeCompile::dumpRelocationHeaderData(uint8_t *cursor, bool isVerbose
          }
          break;
 
+      case TR_BlockFrequency:
+         {
+         TR_RelocationRecordBlockFrequency *bfRecord = reinterpret_cast<TR_RelocationRecordBlockFrequency *>(reloRecord);
+
+         self()->traceRelocationOffsets(cursor, offsetSize, endOfCurrentRecord, orderedPair);
+         if (isVerbose)
+            {
+            traceMsg(self()->comp(), "\n Frequency offset %lld", bfRecord->frequencyOffset(reloTarget));
+            }
+         }
+         break;
+
       default:
          return cursor;
       }
@@ -1982,19 +2046,18 @@ J9::AheadOfTimeCompile::dumpRelocationData()
       }
 
    uint8_t *endOfData;
-      bool is64BitTarget = self()->comp()->target().is64Bit();
-      if (is64BitTarget)
+   if (self()->comp()->target().is64Bit())
       {
       endOfData = cursor + *(uint64_t *)cursor;
       traceMsg(self()->comp(), "Size field in relocation data is %d bytes\n\n", *(uint64_t *)cursor);
       cursor += 8;
       }
-      else
-         {
-         endOfData = cursor + *(uint32_t *)cursor;
-         traceMsg(self()->comp(), "Size field in relocation data is %d bytes\n\n", *(uint32_t *)cursor);
-         cursor += 4;
-         }
+   else
+      {
+      endOfData = cursor + *(uint32_t *)cursor;
+      traceMsg(self()->comp(), "Size field in relocation data is %d bytes\n\n", *(uint32_t *)cursor);
+      cursor += 4;
+      }
 
    if (self()->comp()->getOption(TR_UseSymbolValidationManager))
       {
@@ -2010,43 +2073,7 @@ J9::AheadOfTimeCompile::dumpRelocationData()
 
    while (cursor < endOfData)
       {
-      void *ep1, *ep2, *ep3, *ep4, *ep5, *ep6, *ep7;
-      TR::SymbolReference *tempSR = NULL;
-
-      uint8_t *origCursor = cursor;
-
-      traceMsg(self()->comp(), "%16x  ", cursor);
-
-      // Relocation size
-      traceMsg(self()->comp(), "%-5d", *(uint16_t*)cursor);
-
-      uint8_t *endOfCurrentRecord = cursor + *(uint16_t *)cursor;
-      cursor += 2;
-
-      TR_ExternalRelocationTargetKind kind = (TR_ExternalRelocationTargetKind)(*cursor);
-      // Relocation type
-      traceMsg(self()->comp(), "%-31s", TR::ExternalRelocation::getName(kind));
-
-      // Relocation offset width
-      uint8_t *flagsCursor = cursor + 1;
-      int32_t offsetSize = (*flagsCursor & RELOCATION_TYPE_WIDE_OFFSET) ? 4 : 2;
-      traceMsg(self()->comp(), "%-6d", offsetSize);
-
-      // Ordered-paired or non-paired
-      bool orderedPair = isOrderedPair(*cursor); //(*cursor & RELOCATION_TYPE_ORDERED_PAIR) ? true : false;
-
-      // Relative or Absolute offset type
-      traceMsg(self()->comp(), "%s", (*flagsCursor & RELOCATION_TYPE_EIP_OFFSET) ? "Rel " : "Abs ");
-
-      // Print out the correct number of spaces when no index is available
-      if (kind != TR_HelperAddress && kind != TR_AbsoluteHelperAddress)
-         traceMsg(self()->comp(), "      ");
-
-      cursor++;
-
-      cursor = self()->dumpRelocationHeaderData(origCursor, isVerbose);
-
-      traceMsg(self()->comp(), "\n");
+      cursor = self()->dumpRelocationHeaderData(cursor, isVerbose);
       }
    }
 

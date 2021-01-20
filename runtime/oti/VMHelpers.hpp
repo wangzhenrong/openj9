@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 1991, 2020 IBM Corp. and others
+ * Copyright (c) 1991, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -1113,6 +1113,29 @@ done:
 	}
 
 	/**
+	 * Determines whether the Unicode string is an ASCII string.
+	 *
+	 * @param data[in] points to Unicode characters
+	 * @param length[in] the number of Unicode characters in data
+	 *
+	 * @return true if all of the characters in the Unicode input string are ASCII; false otherwise
+	 */
+	static VMINLINE bool
+	isUnicodeASCII(const U_16 *data, UDATA length)
+	{
+		bool isASCII = true;
+
+		for (UDATA i = 0; i < length; ++i) {
+			if (data[i] > 0x7F) {
+				isASCII = false;
+				break;
+			}
+		}
+
+		return isASCII;
+	}
+
+	/**
 	 * Copies a UTF8 string into a backing array containing UTF16 characters at a specific index.
 	 *
 	 * @param vmThread[in] the current J9VMThread
@@ -1157,7 +1180,7 @@ done:
 			}
 		}
 
-		/* Anonymous classes have the following name format [className]/[ROMADDRESS], so we have to to fix up the name
+		/* Anonymous classes have the following name format [className]/[ROMADDRESS], so we have to fix up the name
 		 * because the previous loops have converted '/' to '.' already.
 		 */
 		if (J9_ARE_ALL_BITS_SET(stringFlags, J9_STR_ANON_CLASS_NAME)) {
@@ -1171,7 +1194,7 @@ done:
 	}
 
 	/**
-	 * Copies a UTF8 string into into a backing array containing ASCII characters at a specific index.
+	 * Copies a UTF8 string into a backing array containing ASCII characters at a specific index.
 	 *
 	 * @param vmThread[in] the current J9VMThread
 	 * @param data[in] points to raw UTF8 bytes, all of which are within the ASCII subset ord. [0, 127]
@@ -1196,7 +1219,7 @@ done:
 			}
 		}
 
-		/* Anonymous classes have the following name format [className]/[ROMADDRESS], so we have to to fix up the name
+		/* Anonymous classes have the following name format [className]/[ROMADDRESS], so we have to fix up the name
 		 * because the previous loops have converted '/' to '.' already.
 		 */
 		if (J9_ARE_ALL_BITS_SET(stringFlags, J9_STR_ANON_CLASS_NAME)) {
@@ -1295,6 +1318,42 @@ done:
 	}
 
 	/**
+	 * Determine if a resolved RAM instance field ref is fully resolved
+	 * for put (put resolved and not a final field).
+	 *
+	 * @param flags[in] field from the ref
+	 * @param method[in] currently running J9Method
+	 * @param ramConstantPool[in] constantPool of method
+	 *
+	 * @returns true if fully put resolved, false if not
+	 */
+	static VMINLINE bool
+	resolvedInstanceFieldRefIsPutResolved(UDATA flags, J9Method *method, J9ConstantPool *ramConstantPool)
+	{
+		bool resolved = true;
+		UDATA const resolvedBit = J9FieldFlagPutResolved;
+		UDATA const finalBit = J9AccFinal;
+		UDATA const testBits = resolvedBit | finalBit;
+		UDATA const bits = flags & testBits;
+		/* Put resolved for a non-final field means fully resolved */
+		if (J9_UNEXPECTED(resolvedBit != bits)) {
+			/* If not put resolved for a final field, resolve is necessary */
+			if (J9_UNEXPECTED(testBits != bits)) {
+				resolved = false;
+			} else {
+				/* Final field - ensure the running method is allowed to store */
+				if (J9_UNEXPECTED(!J9ROMMETHOD_ALLOW_FINAL_FIELD_WRITES(J9_ROM_METHOD_FROM_RAM_METHOD(method), 0))) {
+					if (J9_UNEXPECTED(ramClassChecksFinalStores(ramConstantPool->ramClass))) {
+						/* Store not allowed - run the resolve code to throw the exception */
+						resolved = false;
+					}
+				}
+			}
+		}
+		return resolved;
+	}
+
+	/**
 	 * Determine if a RAM static field ref is resolved.
 	 *
 	 * @param flagsAndClass[in] field from the ref
@@ -1315,6 +1374,42 @@ done:
 		 * the StaticFieldRefDouble bit check to succeed when it shouldn't.
 		 */
 		return ((UDATA)-1 != valueOffset) && (flagsAndClass > 0);
+	}
+
+	/**
+	 * Determine if a resolved RAM static field ref is fully resolved
+	 * for put (put resolved and not a final field).
+	 *
+	 * @param flagsAndClass[in] field from the ref
+	 * @param method[in] currently running J9Method
+	 * @param ramConstantPool[in] constantPool of method
+	 *
+	 * @returns true if fully put resolved, false if not
+	 */
+	static VMINLINE bool
+	resolvedStaticFieldRefIsPutResolved(UDATA flagsAndClass, J9Method *method, J9ConstantPool *ramConstantPool)
+	{
+		bool resolved = true;
+		UDATA const resolvedBit = (UDATA)J9StaticFieldRefPutResolved << (8 * sizeof(UDATA) - J9_REQUIRED_CLASS_SHIFT);
+		UDATA const finalBit = (UDATA)J9StaticFieldRefFinal << (8 * sizeof(UDATA) - J9_REQUIRED_CLASS_SHIFT);
+		UDATA const testBits = resolvedBit | finalBit;
+		UDATA const bits = flagsAndClass & testBits;
+		/* Put resolved for a non-final field means fully resolved */
+		if (J9_UNEXPECTED(resolvedBit != bits)) {
+			/* If not put resolved for a final field, resolve is necessary */
+			if (J9_UNEXPECTED(testBits != bits)) {
+				resolved = false;
+			} else {
+				/* Final field - ensure the running method is allowed to store */
+				if (J9_UNEXPECTED(!J9ROMMETHOD_ALLOW_FINAL_FIELD_WRITES(J9_ROM_METHOD_FROM_RAM_METHOD(method), J9AccStatic))) {
+					if (J9_UNEXPECTED(ramClassChecksFinalStores(ramConstantPool->ramClass))) {
+						/* Store not allowed - run the resolve code to throw the exception */
+						resolved = false;
+					}
+				}
+			}
+		}
+		return resolved;
 	}
 
 	/**
@@ -1522,7 +1617,7 @@ exit:
 				|| (method == vm->jliMethodHandleInvokeWithArgs)
 				|| (method == vm->jliMethodHandleInvokeWithArgsList)
 				|| (vm->srMethodAccessor
-						&& VM_VMHelpers::isSameOrSuperclass(
+						&& isSameOrSuperclass(
 								J9VM_J9CLASS_FROM_JCLASS(currentThread,
 										vm->srMethodAccessor), currentClass)));
 	}

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 1991, 2020 IBM Corp. and others
+ * Copyright (c) 1991, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -601,7 +601,7 @@ done:
 					UDATA *bp = buildMethodFrame(REGISTER_ARGS, _sendMethod, J9_SSF_JIT_NATIVE_TRANSITION_FRAME);
 					updateVMStruct(REGISTER_ARGS);
 					/* this call cannot change bp as no java code is run */
-					UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT_CODEGEN);
+					UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT);
 					J9JITConfig *jitConfig = _vm->jitConfig;
 					jitConfig->entryPoint(jitConfig, _currentThread, _sendMethod, 0);
 					popVMState(REGISTER_ARGS, oldState);
@@ -1889,7 +1889,7 @@ done:
 				UDATA *bp = buildMethodFrame(REGISTER_ARGS, _sendMethod, 0);
 				updateVMStruct(REGISTER_ARGS);
 				/* this call cannot change bp as no java code is run */
-				UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT_CODEGEN);
+				UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT);
 				J9JITConfig *jitConfig = _vm->jitConfig;
 				jitConfig->entryPoint(jitConfig, _currentThread, _sendMethod, 0);
 				popVMState(REGISTER_ARGS, oldState);
@@ -2062,7 +2062,7 @@ done:
 		UDATA *bp = buildMethodFrame(REGISTER_ARGS, _sendMethod, jitStackFrameFlags(REGISTER_ARGS, 0));
 		updateVMStruct(REGISTER_ARGS);
 		/* this call cannot change bp as no java code is run */
-		UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT_CODEGEN);
+		UDATA oldState = pushVMState(REGISTER_ARGS, J9VMSTATE_JIT);
 		J9JITConfig *jitConfig = _vm->jitConfig;
 		jitConfig->entryPoint(jitConfig, _currentThread, _sendMethod, 0);
 		popVMState(REGISTER_ARGS, oldState);
@@ -6396,10 +6396,12 @@ done:
 		void* volatile valueAddress = NULL;
 		void *resolveResult = NULL;
 
-		if (J9_UNEXPECTED(!VM_VMHelpers::staticFieldRefIsResolved(flagsAndClass, valueOffset))) {
+		if (J9_UNEXPECTED(!(
+			VM_VMHelpers::staticFieldRefIsResolved(flagsAndClass, valueOffset) &&
+			VM_VMHelpers::resolvedStaticFieldRefIsPutResolved(flagsAndClass, _literals, ramConstantPool)
+		))) {
 			/* Unresolved */
-resolve:
-			J9Method *method = _literals;
+			J9Method *method = _literals; /* Record the running method before building the special frame */
 			buildGenericSpecialStackFrame(REGISTER_ARGS, 0);
 			updateVMStruct(REGISTER_ARGS);
 			resolveResult = resolveStaticFieldRef(_currentThread, method, ramConstantPool, index, J9_RESOLVE_FLAG_RUNTIME_RESOLVE | J9_RESOLVE_FLAG_FIELD_SETTER | J9_RESOLVE_FLAG_CHECK_CLINIT, NULL);
@@ -6417,26 +6419,6 @@ resolve:
 			}
 			valueOffset = ramStaticFieldRef->valueOffset;
 			flagsAndClass = ramStaticFieldRef->flagsAndClass;
-		} else {
-			/* Ref is resolved, see if it's fully resolved for put (put resolved and not a final field) */
-			UDATA const resolvedBit = (UDATA)J9StaticFieldRefPutResolved << (8 * sizeof(UDATA) - J9_REQUIRED_CLASS_SHIFT);
-			UDATA const finalBit = (UDATA)J9StaticFieldRefFinal << (8 * sizeof(UDATA) - J9_REQUIRED_CLASS_SHIFT);
-			UDATA const testBits = resolvedBit | finalBit;
-			UDATA const bits = flagsAndClass & testBits;
-			/* Put resolved for a non-final field means fully resolved */
-			if (J9_UNEXPECTED(resolvedBit != bits)) {
-				/* If not put resolved for a final field, resolve is necessary */
-				if (J9_UNEXPECTED(testBits != bits)) {
-					goto resolve;
-				}
-				/* Final field - ensure the running method is allowed to store */
-				if (J9_UNEXPECTED(!J9ROMMETHOD_ALLOW_FINAL_FIELD_WRITES(J9_ROM_METHOD_FROM_RAM_METHOD(_literals), J9AccStatic))) {
-					if (J9_UNEXPECTED(VM_VMHelpers::ramClassChecksFinalStores(ramConstantPool->ramClass))) {
-						/* Store not allowed - run the resolve code to throw the exception */
-						goto resolve;
-					}
-				}
-			}
 		}
 		/* Swap flags and class subfield order. */
 		classAndFlags = J9CLASSANDFLAGS_FROM_FLAGSANDCLASS(flagsAndClass);
@@ -6595,9 +6577,11 @@ done:
 		UDATA flags = ramFieldRef->flags;
 		UDATA valueOffset = ramFieldRef->valueOffset;
 
-		if (J9_UNEXPECTED(!VM_VMHelpers::instanceFieldRefIsResolved(flags, valueOffset))) {
+		if (J9_UNEXPECTED(!(
+			VM_VMHelpers::instanceFieldRefIsResolved(flags, valueOffset) &&
+			VM_VMHelpers::resolvedInstanceFieldRefIsPutResolved(flags, _literals, ramConstantPool)
+		))) {
 			/* Unresolved */
-resolve:
 			J9Method *method = _literals;
 			buildGenericSpecialStackFrame(REGISTER_ARGS, 0);
 			updateVMStruct(REGISTER_ARGS);
@@ -6613,26 +6597,6 @@ resolve:
 			}
 			flags = ramFieldRef->flags;
 			valueOffset = ramFieldRef->valueOffset;
-		} else {
-			/* Ref is resolved, see if it's fully resolved for put (put resolved and not a final field) */
-			UDATA const resolvedBit = J9FieldFlagPutResolved;
-			UDATA const finalBit = J9AccFinal;
-			UDATA const testBits = resolvedBit | finalBit;
-			UDATA const bits = flags & testBits;
-			/* Put resolved for a non-final field means fully resolved */
-			if (J9_UNEXPECTED(resolvedBit != bits)) {
-				/* If not put resolved for a final field, resolve is necessary */
-				if (J9_UNEXPECTED(testBits != bits)) {
-					goto resolve;
-				}
-				/* Final field - ensure the running method is allowed to store */
-				if (J9_UNEXPECTED(!J9ROMMETHOD_ALLOW_FINAL_FIELD_WRITES(J9_ROM_METHOD_FROM_RAM_METHOD(_literals), 0))) {
-					if (J9_UNEXPECTED(VM_VMHelpers::ramClassChecksFinalStores(ramConstantPool->ramClass))) {
-						/* Store not allowed - run the resolve code to throw the exception */
-						goto resolve;
-					}
-				}
-			}
 		}
 #if defined(DO_HOOKS)
 		if (J9_EVENT_IS_HOOKED(_vm->hookInterface, J9HOOK_VM_PUT_FIELD)) {
@@ -8383,27 +8347,42 @@ done:
 		J9Method *method = (J9Method *)(UDATA)J9OBJECT_U64_LOAD(_currentThread, memberNameObject, _vm->vmtargetOffset);
 		UDATA vTableOffset = methodID->vTableIndex;
 
-		if (J9_ARE_ANY_BITS_SET(vTableOffset, J9_JNI_MID_INTERFACE)) {
-			UDATA iTableIndex = vTableOffset & ~(UDATA)J9_JNI_MID_INTERFACE;
-			J9Class *interfaceClass = J9_CLASS_FROM_METHOD(method);
-			vTableOffset = 0;
-			J9ITable * iTable = receiverClass->lastITable;
-			if (interfaceClass == iTable->interfaceClass) {
-				goto foundITable;
-			}
-			iTable = (J9ITable*)receiverClass->iTable;
-			while (NULL != iTable) {
+		/* vmindexOffset (J9JNIMethodID) is initialized using jnicsup.cpp::initializeMethodID.
+		 * initializeMethodID will set J9JNIMethodID->vTableIndex to 0 for private interface
+		 * methods and j.l.Object methods. When J9JNIMethodID->vTableIndex is 0, then
+		 * vmtargetOffset (J9Method) is the _sendMethod, and it will point to the private
+		 * interface method or j.l.Object method. When J9JNIMethodID->vTableIndex is not 0,
+		 * then it is either a vTable offset or an iTable index.
+		 */
+		if (0 == vTableOffset) {
+			/* Private interface method or j.l.Object method. */
+			_sendMethod = method;
+		} else {
+			/* Treat as vTable offset for the method if J9_JNI_MID_INTERFACE is not set. */
+			if (J9_ARE_ANY_BITS_SET(vTableOffset, J9_JNI_MID_INTERFACE)) {
+				/* Treat as iTable index for the method if J9_JNI_MID_INTERFACE is set. */
+				UDATA iTableIndex = vTableOffset & ~(UDATA)J9_JNI_MID_INTERFACE;
+				J9Class *interfaceClass = J9_CLASS_FROM_METHOD(method);
+				/* Get the latest version of the class for the iTable search. */
+				interfaceClass = VM_VMHelpers::currentClass(interfaceClass);
+				vTableOffset = 0;
+				J9ITable * iTable = receiverClass->lastITable;
 				if (interfaceClass == iTable->interfaceClass) {
-					receiverClass->lastITable = iTable;
-foundITable:
-					vTableOffset = ((UDATA*)(iTable + 1))[iTableIndex];
-					break;
+					goto foundITable;
 				}
-				iTable = iTable->next;
+				iTable = (J9ITable*)receiverClass->iTable;
+				while (NULL != iTable) {
+					if (interfaceClass == iTable->interfaceClass) {
+						receiverClass->lastITable = iTable;
+foundITable:
+						vTableOffset = ((UDATA*)(iTable + 1))[iTableIndex];
+						break;
+					}
+					iTable = iTable->next;
+				}
 			}
+			_sendMethod = *(J9Method **)(((UDATA)receiverClass) + vTableOffset);
 		}
-
-		_sendMethod = *(J9Method **)(((UDATA)receiverClass) + vTableOffset);
 
 		if (fromJIT) {
 			/* Restore sp position before popping memberNameObject. */

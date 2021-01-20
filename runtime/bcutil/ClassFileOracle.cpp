@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2001, 2020 IBM Corp. and others
+ * Copyright (c) 2001, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -450,7 +450,7 @@ ClassFileOracle::walkAttributes()
 			_isSynthetic = true;
 			break;
 		case CFR_ATTRIBUTE_SourceFile:
-			if (!hasSourceFile()) {
+			if (!hasSourceFile() && _context->shouldPreserveSourceFileName()) {
 				_sourceFile = (J9CfrAttributeSourceFile *)attrib;
 				markConstantUTF8AsReferenced(_sourceFile->sourceFileIndex);
 			}
@@ -915,7 +915,7 @@ ClassFileOracle::walkTypeAnnotations(U_16 annotationsCount, J9CfrTypeAnnotation 
 			 *
 			 * In this case, force the typeIndex to a null value.
 			 * This will cause the parser to throw
-			 * an error if the the VM or application tries to retrieve the annotation.
+			 * an error if the VM or application tries to retrieve the annotation.
 			 */
 			annotation->typeIndex = 0;
 		}

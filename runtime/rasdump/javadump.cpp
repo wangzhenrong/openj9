@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2003, 2020 IBM Corp. and others
+ * Copyright (c) 2003, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -3529,7 +3529,7 @@ JavaCoreDumpWriter::writeJitMethod(J9VMThread* vmThread)
 		bool      insideJitMethod = false;
 		bool      isCompiling     = false;
 
-		if ((vmThread->omrVMThread->vmState & J9VMSTATE_MAJOR) == J9VMSTATE_JIT_CODEGEN) {
+		if ((vmThread->omrVMThread->vmState & J9VMSTATE_MAJOR) == J9VMSTATE_JIT) {
 			ramMethod = vmThread->jitMethodToBeCompiled;
 			isCompiling = true;
 
@@ -5291,14 +5291,14 @@ JavaCoreDumpWriter::writeCPUinfo(void)
 	_OutputStream.writeCharacters(
 			"2CITARGETCPU   Target CPUs: ");
 	_OutputStream.writeInteger(target, "%i\n");
-	
+
 	char buff[400];
 	intptr_t rc = -1;
 	if (_VirtualMachine->jitConfig) {
 		rc = omrsysinfo_get_processor_feature_string(&_VirtualMachine->jitConfig->targetProcessor, buff, sizeof(buff));
 		if (rc != -1) {
 			_OutputStream.writeCharacters(
-				"2CIJITFEATURE  CPU features (JIT): ");
+					"2CIJITFEATURE  CPU features (JIT): ");
 			_OutputStream.writeCharacters(buff);
 			_OutputStream.writeCharacters("\n");
 		}
@@ -5306,18 +5306,17 @@ JavaCoreDumpWriter::writeCPUinfo(void)
 		rc = omrsysinfo_get_processor_feature_string(&_VirtualMachine->jitConfig->relocatableTargetProcessor, buff, sizeof(buff));
 		if (rc != -1) {
 			_OutputStream.writeCharacters(
-	   			"2CIAOTFEATURE  CPU features (AOT): ");
+					"2CIAOTFEATURE  CPU features (AOT): ");
 			_OutputStream.writeCharacters(buff);
 			_OutputStream.writeCharacters("\n");
 		}
-	}
-	else {
+	} else {
 		OMRProcessorDesc processorDescription;
 		omrsysinfo_get_processor_description(&processorDescription);
 		rc = omrsysinfo_get_processor_feature_string(&processorDescription, buff, sizeof(buff));
 		if (rc != -1) {
 			_OutputStream.writeCharacters(
-				"2CIINTFEATURE  CPU features (INT): ");
+					"2CIINTFEATURE  CPU features (INT): ");
 			_OutputStream.writeCharacters(buff);
 			_OutputStream.writeCharacters("\n");
 		}

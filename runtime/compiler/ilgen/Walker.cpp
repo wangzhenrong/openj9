@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2000, 2020 IBM Corp. and others
+ * Copyright (c) 2000, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -5587,6 +5587,8 @@ TR_J9ByteCodeIlGenerator::loadStatic(int32_t cpIndex)
                                                           TR::VMAccessCriticalSection::tryToAcquireVMAccess,
                                                           comp());
 
+   TR::Node * load = NULL;
+
    if (canOptimizeFinalStatic &&
        loadStaticCriticalSection.hasVMAccess())
       {
@@ -5604,9 +5606,9 @@ TR_J9ByteCodeIlGenerator::loadStatic(int32_t cpIndex)
                {
                // the address isn't constant, because a GC could move it, however is it nonnull
                //
-               TR::Node * node = TR::Node::createLoad(symRef);
-               node->setIsNonNull(true);
-               push(node);
+               load = TR::Node::createLoad(symRef);
+               load->setIsNonNull(true);
+               push(load);
                break;
                }
          case TR::Double:  loadConstant(TR::dconst, *(double *) p); break;
@@ -5631,17 +5633,11 @@ TR_J9ByteCodeIlGenerator::loadStatic(int32_t cpIndex)
       }
    else
       {
-      TR::Node * load;
       if (_generateReadBarriersForFieldWatch)
          {
          void * staticClass = method()->classOfStatic(cpIndex);
          loadSymbol(TR::loadaddr, symRefTab()->findOrCreateClassSymbol(_methodSymbol, cpIndex, staticClass, true /* cpIndexOfStatic */));
          load = TR::Node::createWithSymRef(comp()->il.opCodeForDirectReadBarrier(type), 1, pop(), 0, symRef);
-         }
-      else if (cg()->getAccessStaticsIndirectly() && isResolved && type != TR::Address && (!comp()->compileRelocatableCode() || comp()->getOption(TR_UseSymbolValidationManager)))
-         {
-         TR::Node * statics = TR::Node::createWithSymRef(TR::loadaddr, 0, symRefTab()->findOrCreateClassStaticsSymbol(_methodSymbol, cpIndex));
-         load = TR::Node::createWithSymRef(comp()->il.opCodeForIndirectLoad(type), 1, 1, statics, symRef);
          }
       else
          load = TR::Node::createWithSymRef(comp()->il.opCodeForDirectLoad(type), 0, symRef);
@@ -5658,18 +5654,20 @@ TR_J9ByteCodeIlGenerator::loadStatic(int32_t cpIndex)
          genTreeTop(treeTopNode);
          }
 
-      static char *disableFinalFieldFoldingInILGen = feGetEnv("TR_DisableFinalFieldFoldingInILGen");
-      static char *disableStaticFinalFieldFoldingInILGen = feGetEnv("TR_DisableStaticFinalFieldFoldingInILGen");
-      if (!disableFinalFieldFoldingInILGen &&
-          !disableStaticFinalFieldFoldingInILGen &&
-          symbol->isFinal() &&
-          TR::TransformUtil::canFoldStaticFinalField(comp(), load) == TR_yes)
-         {
-         TR::TransformUtil::foldReliableStaticFinalField(comp(), load);
-         }
-
       push(load);
       }
+
+   static char *disableFinalFieldFoldingInILGen = feGetEnv("TR_DisableFinalFieldFoldingInILGen");
+   static char *disableStaticFinalFieldFoldingInILGen = feGetEnv("TR_DisableStaticFinalFieldFoldingInILGen");
+   if (load &&
+       !disableFinalFieldFoldingInILGen &&
+       !disableStaticFinalFieldFoldingInILGen &&
+       symbol->isFinal() &&
+       TR::TransformUtil::canFoldStaticFinalField(comp(), load) == TR_yes)
+      {
+      TR::TransformUtil::foldReliableStaticFinalField(comp(), load);
+      }
+
    }
 
 TR::Node *
@@ -6079,6 +6077,22 @@ TR_J9ByteCodeIlGenerator::loadFromCallSiteTable(int32_t callSiteIndex)
 void
 TR_J9ByteCodeIlGenerator::loadArrayElement(TR::DataType dataType, TR::ILOpCodes nodeop, bool checks)
    {
+   if (TR::Compiler->om.areValueTypesEnabled() && dataType == TR::Address)
+      {
+      TR::Node* elementIndex = pop();
+      TR::Node* arrayBaseAddress = pop();
+      if (!arrayBaseAddress->isNonNull())
+         {
+         auto* nullchk = TR::Node::create(TR::PassThrough, 1, arrayBaseAddress);
+         nullchk = genNullCheck(nullchk);
+         genTreeTop(nullchk);
+         }
+      auto* helperSymRef = comp()->getSymRefTab()->findOrCreateLoadFlattenableArrayElementSymbolRef();
+      auto* helperCallNode = TR::Node::createWithSymRef(TR::acall, 2, 2, elementIndex, arrayBaseAddress, helperSymRef);
+      push(helperCallNode);
+      return;
+      }
+
    bool genSpineChecks = comp()->requiresSpineChecks();
 
    _suppressSpineChecks = false;
@@ -7346,11 +7360,6 @@ TR_J9ByteCodeIlGenerator::storeStatic(int32_t cpIndex)
 
       node = TR::Node::createWithSymRef(TR::call, 2, 2, value, statics, volatileLongSymRef);
       }
-   else if (!symRef->isUnresolved() && cg()->getAccessStaticsIndirectly() && type != TR::Address && (!comp()->compileRelocatableCode() || comp()->getOption(TR_UseSymbolValidationManager)))
-      {
-      TR::Node * statics = TR::Node::createWithSymRef(TR::loadaddr, 0, symRefTab()->findOrCreateClassStaticsSymbol(_methodSymbol, cpIndex));
-      node = TR::Node::createWithSymRef(comp()->il.opCodeForIndirectStore(type), 2, 2, statics, value, symRef);
-      }
    else
       {
       node = TR::Node::createStore(symRef, value);
@@ -7527,6 +7536,21 @@ TR_J9ByteCodeIlGenerator::storeArrayElement(TR::DataType dataType, TR::ILOpCodes
    TR::Node * value = pop();
 
    handlePendingPushSaveSideEffects(value);
+
+   if (TR::Compiler->om.areValueTypesEnabled() && dataType == TR::Address)
+      {
+      TR::Node* elementIndex = pop();
+      TR::Node* arrayBaseAddress = pop();
+      if (!arrayBaseAddress->isNonNull())
+         {
+         auto* nullchk = TR::Node::create(TR::PassThrough, 1, arrayBaseAddress);
+         nullchk = genNullCheck(nullchk);
+         genTreeTop(nullchk);
+         }
+      auto* helperSymRef = comp()->getSymRefTab()->findOrCreateStoreFlattenableArrayElementSymbolRef();
+      genTreeTop(TR::Node::createWithSymRef(TR::acall, 3, 3, value, elementIndex, arrayBaseAddress, helperSymRef));
+      return;
+      }
 
    bool genSpineChecks = comp()->requiresSpineChecks();
 

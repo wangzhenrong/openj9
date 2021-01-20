@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2000, 2020 IBM Corp. and others
+ * Copyright (c) 2000, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -509,10 +509,8 @@ TR_YesNoMaybe TR::CompilationInfo::shouldActivateNewCompThread()
       return TR_yes;
       }
    else if (getPersistentInfo()->getRemoteCompilationMode() == JITServer::CLIENT &&
-            JITServerHelpers::isServerAvailable() &&
-            serverHasLowPhysicalMemory())
+            getCompThreadActivationPolicy() <= JITServer::CompThreadActivationPolicy::MAINTAIN)
       {
-      // If the available memory on the server is low, do not activate more client threads
       return TR_no;
       }
 #endif
@@ -551,6 +549,16 @@ TR_YesNoMaybe TR::CompilationInfo::shouldActivateNewCompThread()
    // to activate additional comp threads irrespective of the CPU entitlement
    if (TR::Options::_useCPUsToDetermineMaxNumberOfCompThreadsToActivate)
       {
+#if defined (J9VM_OPT_JITSERVER)
+      if (getCompThreadActivationPolicy() == JITServer::CompThreadActivationPolicy::SUBDUE)
+         {
+         // If the server reached low memory and then recovered to normal,
+         // subdue activation of new compilation threads on the client
+         if (_queueWeight > _compThreadActivationThresholdsonStarvation[getNumCompThreadsActive()] << 1)
+            return TR_yes;
+         return TR_no;
+         }
+#endif /* defined(J9VM_OPT_JITSERVER) */
       if (getNumCompThreadsActive() < getNumTargetCPUs() - 1)
          {
          if (_queueWeight > _compThreadActivationThresholds[getNumCompThreadsActive()])
@@ -563,6 +571,7 @@ TR_YesNoMaybe TR::CompilationInfo::shouldActivateNewCompThread()
          // For JITClient let's be more agressive with compilation thread activation
          // because the latencies are larger. Beyond 'numProc-1' we will use the
          // 'starvation activation schedule', but accelerated (divide those thresholds by 2)
+         // NOTE: compilation thread activation policy is AGGRESSIVE if we reached this point
          if (_queueWeight > (_compThreadActivationThresholdsonStarvation[getNumCompThreadsActive()] >> 1))
             return TR_yes;
          }
@@ -1175,7 +1184,7 @@ TR::CompilationInfo::CompilationInfo(J9JITConfig *jitConfig) :
    _compReqSeqNo = 0;
    _chTableUpdateFlags = 0;
    _localGCCounter = 0;
-   _serverHasLowPhysicalMemory = false;
+   _activationPolicy = JITServer::CompThreadActivationPolicy::AGGRESSIVE;
 #endif /* defined(J9VM_OPT_JITSERVER) */
    }
 
@@ -2174,6 +2183,8 @@ bool TR::CompilationInfo::shouldRetryCompilation(TR_MethodToBeCompiled *entry, T
             case compilationAOTValidateTMFailure:
             case compilationAOTRelocationRecordGenerationFailure:
             case compilationAotValidateExceptionHookFailure:
+            case compilationAotBlockFrequencyReloFailure:
+            case compilationAotRecompQueuedFlagReloFailure:
                // switch to JIT for these cases (we don't want to relocate again)
                entry->_doNotUseAotCodeFromSharedCache = true;
                tryCompilingAgain = true;
@@ -4408,7 +4419,7 @@ TR::CompilationInfoPerThread::processEntry(TR_MethodToBeCompiled &entry, J9::J9S
             )
 #if defined(J9VM_OPT_JITSERVER)
          || (compInfo->getPersistentInfo()->getRemoteCompilationMode() == JITServer::CLIENT
-            && compInfo->serverHasLowPhysicalMemory()) // keep suspending threads until server space frees up
+            && compInfo->getCompThreadActivationPolicy() == JITServer::CompThreadActivationPolicy::SUSPEND) // keep suspending threads until server space frees up
 #endif
          )
       )
@@ -4426,7 +4437,7 @@ TR::CompilationInfoPerThread::processEntry(TR_MethodToBeCompiled &entry, J9::J9S
             compInfo->getRampDownMCT() ? "RampDownMCT" : "",
             compInfo->getSuspendThreadDueToLowPhysicalMemory() ? "LowPhysicalMem" : "",
 #if defined(J9VM_OPT_JITSERVER)
-            compInfo->serverHasLowPhysicalMemory() ? "ServerLowPhysicalMem" :
+            compInfo->getCompThreadActivationPolicy() == JITServer::CompThreadActivationPolicy::SUSPEND ? "ServerLowPhysicalMem" :
 #endif
             ""
             );
@@ -7756,7 +7767,7 @@ TR::CompilationInfoPerThreadBase::compile(J9VMThread * vmThread,
 #endif
 
    UDATA oldState = vmThread->omrVMThread->vmState;
-   vmThread->omrVMThread->vmState = J9VMSTATE_JIT_CODEGEN | 0x0000FFFF;
+   vmThread->omrVMThread->vmState = J9VMSTATE_JIT | J9VMSTATE_MINOR;
    vmThread->jitMethodToBeCompiled = method;
 
    try
@@ -8133,26 +8144,27 @@ TR::CompilationInfoPerThreadBase::wrappedCompile(J9PortLibrary *portLib, void * 
                options->setOption(TR_UseSymbolValidationManager, false);
                }
 
-            // Set jitDump specific options
+            // Set jitdump specific options
             TR::CompilationInfoPerThread *threadCompInfo = compInfo ? compInfo->getCompInfoForThread(vmThread) : NULL;
-            if (threadCompInfo &&
+            if (threadCompInfo != NULL &&
                 threadCompInfo->isDiagnosticThread() &&
                 options->getDebug())
                {
-               // Trace All
                options->setOption(TR_TraceAll);
+               options->setOption(TR_EnableParanoidOptCheck);
 
-               // Trace crashing optimization
-               UDATA state = compInfo->getVMStateOfCrashedThread();
-               uint32_t index = (state >> 16) & 0xFF;
-
-               if ((isValidVmStateIndex(index)) &&
-                   (index == ((J9VMSTATE_JIT_CODEGEN>>16) & 0xF)))
+               // Trace crashing optimization or the codegen depending on where we crashed
+               UDATA vmState = compInfo->getVMStateOfCrashedThread();
+               if ((vmState & J9VMSTATE_JIT_CODEGEN) == J9VMSTATE_JIT_CODEGEN)
                   {
-                  OMR::Optimizations opt = (OMR::Optimizations)((state >> 8) & 0xFF);
+                  options->setOption(TR_TraceCG);
+                  options->setOption(TR_TraceRA);
+                  }
+               else if ((vmState & J9VMSTATE_JIT_OPTIMIZER) == J9VMSTATE_JIT_OPTIMIZER)
+                  {
+                  OMR::Optimizations opt = static_cast<OMR::Optimizations>((vmState & 0xFF00) >> 8);
                   if (0 < opt && opt < OMR::numOpts)
                      {
-                     // Trace the optimization that the crash happened in
                      options->enableTracing(opt);
                      }
                   }

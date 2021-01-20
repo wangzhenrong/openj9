@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2000, 2020 IBM Corp. and others
+ * Copyright (c) 2000, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -58,10 +58,10 @@
 ////////////////////////////////////////////////////////////////////////////////
 // J9::Z::PrivateLinkage for J9
 ////////////////////////////////////////////////////////////////////////////////
-J9::Z::PrivateLinkage::PrivateLinkage(TR::CodeGenerator * codeGen,TR_S390LinkageConventions elc, TR_LinkageConventions lc)
+J9::Z::PrivateLinkage::PrivateLinkage(TR::CodeGenerator * codeGen,TR_LinkageConventions lc)
    : J9::PrivateLinkage(codeGen)
    {
-   setExplicitLinkageType(elc);
+   setLinkageType(lc);
 
    // linkage properties
    setProperty(SplitLongParm);
@@ -2993,7 +2993,7 @@ TR::Register * J9::Z::JNILinkage::buildDirectDispatch(TR::Node * callNode)
       }
 
    // JNI dispatch does not allow for any object references to survive in preserved registers as they are saved onto
-   // the system stack, which the JVM stack walker has has no awareness of. Hence we need to ensure that all object
+   // the system stack, which the JVM stack walker has no awareness of. Hence we need to ensure that all object
    // references are evicted from preserved registers at the call site.
    TR::Register* tempReg = cg()->allocateRegister();
 
@@ -3508,7 +3508,7 @@ J9::Z::PrivateLinkage::getSystemStackPointerRegister()
    }
 
 
-J9::Z::JNILinkage::JNILinkage(TR::CodeGenerator * cg, TR_S390LinkageConventions elc, TR_LinkageConventions lc)
-   :J9::Z::PrivateLinkage(cg, elc, lc)
+J9::Z::JNILinkage::JNILinkage(TR::CodeGenerator * cg, TR_LinkageConventions elc)
+   :J9::Z::PrivateLinkage(cg, elc)
    {
    }

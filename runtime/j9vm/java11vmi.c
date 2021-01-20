@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2015, 2020 IBM Corp. and others
+ * Copyright (c) 2015, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -510,7 +510,7 @@ exportPackageToAll(J9VMThread * currentThread, J9Module * fromModule, const char
 	UDATA retval = ERRCODE_GENERAL_FAILURE;
 	J9Package * const j9package = getPackageDefinition(currentThread, fromModule, package, &retval);
 	if (NULL != j9package) {
-		j9package->exportToAll = TRUE;
+		j9package->exportToAll = 1;
 		if (TrcEnabled_Trc_MODULE_addModuleExportsToAll) {
 			trcModulesAddModuleExportsToAll(currentThread, fromModule, package);
 		}
@@ -541,7 +541,7 @@ exportPackageToAllUnamed(J9VMThread * currentThread, J9Module * fromModule, cons
 	UDATA retval = ERRCODE_GENERAL_FAILURE;
 	J9Package * const j9package = getPackageDefinition(currentThread, fromModule, package, &retval);
 	if (NULL != j9package) {
-		j9package->exportToAllUnnamed = TRUE;
+		j9package->exportToAllUnnamed = 1;
 		if (TrcEnabled_Trc_MODULE_addModuleExportsToAllUnnamed) {
 			trcModulesAddModuleExportsToAllUnnamed(currentThread, fromModule, package);
 		}
@@ -887,6 +887,8 @@ JVM_DefineModule(JNIEnv * env, jobject module, jboolean isOpen, jstring version,
 							TRIGGER_J9HOOK_JAVA_BASE_LOADED(vm->hookInterface, currentThread);
 							Trc_MODULE_defineModule(currentThread, "java.base", j9mod);
 						}
+
+						TRIGGER_J9HOOK_VM_MODULE_LOAD(vm->hookInterface, currentThread, j9mod);
 					} else {
 						throwExceptionHelper(currentThread, rc);
 					}

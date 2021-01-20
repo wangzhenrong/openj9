@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2018, 2020 IBM Corp. and others
+ * Copyright (c) 2018, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -66,7 +66,7 @@
  *   ENABLE_SUMMARY_AUTO_REFRESH: Boolean - flag to enable the downstream summary auto-refresh, default: false
  */
 
-CURRENT_RELEASES = ['8', '11', '14', '15', 'next']
+CURRENT_RELEASES = ['8', '11', '15', '16', 'next']
 
 SPECS = ['ppc64_aix' : CURRENT_RELEASES,
          'ppc64_aix_cm' : CURRENT_RELEASES,
@@ -379,7 +379,7 @@ try {
                     def BUILD_NODES = get_node_labels(BUILD_NODE_LABELS, BUILD_SPECS.keySet())
                     def TEST_NODES = get_node_labels(TEST_NODE_LABELS, BUILD_SPECS.keySet())
 
-                    // Stash DSL file so we can quickly load it on master
+                    // Stash DSL file so we can quickly load it on Jenkins Manager node
                     if (AUTOMATIC_GENERATION != 'false') {
                         stash includes: 'buildenv/jenkins/jobs/pipelines/Pipeline_Template.groovy', name: 'DSL'
                     }

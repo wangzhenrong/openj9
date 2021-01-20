@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2001, 2020 IBM Corp. and others
+ * Copyright (c) 2001, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -539,9 +539,17 @@ bool
 ComparingCursor::isRangeValidForUTF8Ptr(J9UTF8 *utf8)
 {
 	U_8 *ptr = (U_8*)utf8;
-
+	/*
+	 * Need to check the UTF8 to verify that it is either in a J9MemorySegment or in the
+	 * SCC.
+	 */
 	if (_checkRangeInSharedCache) {
-		return FALSE != j9shr_Query_IsAddressInCache(_javaVM, utf8, J9UTF8_TOTAL_SIZE(utf8));
+		/* Need to check if the header (length field) is in range first, before reading the length
+		 * to determine if the rest of the data is in range. Failure to do so results in potentially
+		 * dereferencing inaccessible memory.
+		 */
+		return j9shr_Query_IsAddressInCache(_javaVM, utf8, sizeof(J9UTF8))
+				&& j9shr_Query_IsAddressInCache(_javaVM, utf8, J9UTF8_TOTAL_SIZE(utf8));
 	} else {
 		UDATA maxLength = getMaximumValidLengthForPtrInSegment(ptr);
 
@@ -619,14 +627,14 @@ ComparingCursor::getCountingCursor(DataType dataType) {
 				return &_lineNumberHelper;
 
 			}
-			/*If the debug data is is inline return _mainHelper*/
+			/*If the debug data is inline return _mainHelper*/
 			break;
 		case LOCAL_VARIABLE_DATA_SRP_TO_UTF8:
 		case LOCAL_VARIABLE_DATA:
 			if (!(_context->shouldWriteDebugDataInline())) {
 				return &_varInfoHelper;				
 			}
-			/*If the debug data is is inline return _mainHelper*/
+			/*If the debug data is inline return _mainHelper*/
 			break;
 		default:
 			break;

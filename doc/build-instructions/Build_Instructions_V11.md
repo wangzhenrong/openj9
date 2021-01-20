@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2018, 2020 IBM Corp. and others
+Copyright (c) 2018, 2021 IBM Corp. and others
 
 This program and the accompanying materials are made available under
 the terms of the Eclipse Public License 2.0 which accompanies this
@@ -361,12 +361,12 @@ You must install a number of software dependencies to create a suitable build en
 
 Add the binary path of Clang to the `PATH` environment variable to override the older version of clang integrated in Cygwin. e.g.
 ```
-export PATH="/cygdrive/c/LLVM/bin:$PATH" (in Cygwin)
+export PATH="/cygdrive/c/Program Files/LLVM/bin:$PATH" (in Cygwin)
 ```
 
 Add the path to `nasm.exe` to the `PATH` environment variable to override the older version of NASM installed in Cygwin. e.g.
 ```
-export PATH="/cygdrive/c/NASM:$PATH" (in Cygwin)
+export PATH="/cygdrive/c/Program Files/NASM:$PATH" (in Cygwin)
 ```
 
 Update your `LIB` and `INCLUDE` environment variables to provide a path to the Windows debugging tools with the following commands:
@@ -392,8 +392,7 @@ wget https://sourceforge.net/projects/freemarker/files/freemarker/2.3.8/freemark
 - Install Visual Studio by running the file `vs2013.exe` (There is no special step required for downloading/installing VS2017. Please follow the guide of the downloaded installer to install all required components, especially for VC compiler).
 
 Not all of the shared libraries that are included with Visual Studio are registered during installation.
-In particular, the `msdia120.dll`(VS2013) or `msdia140.dll`(VS2017) libraries must be registered manually.
-To do so, execute the following from a command prompt:
+In particular, the `msdia120.dll`(VS2013) or `msdia140.dll`(VS2017) libraries must be registered manually by running command prompt as administrator.  To do so, execute the following from a command prompt:
 
 **VS2013**
 ```
@@ -502,9 +501,9 @@ The following instructions guide you through the process of building a macOS **O
 
 ### 1. Prepare your system
 :apple:
-You must install a number of software dependencies to create a suitable build environment on your system:
+You must install a number of software dependencies to create a suitable build environment on your system (the specified versions are minimums):
 
-- [Xcode >= 11.4](https://developer.apple.com/download/more/) (requires an Apple account to log in).
+- [Xcode 10.3, use >= 11.4.1 to support code signing](https://developer.apple.com/download/more/) (requires an Apple account to log in).
 - [macOS OpenJDK 11](https://api.adoptopenjdk.net/v3/binary/latest/11/ga/mac/x64/jdk/openj9/normal/adoptopenjdk), which is used as the boot JDK.
 
 The following dependencies can be installed by using [Homebrew](https://brew.sh/) (the specified versions are minimums):

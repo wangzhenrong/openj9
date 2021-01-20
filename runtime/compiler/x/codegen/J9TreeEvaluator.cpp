@@ -52,9 +52,11 @@
 #include "control/RecompilationInfo.hpp"
 #include "env/CompilerEnv.hpp"
 #include "env/CHTable.hpp"
-#include "env/PersistentCHTable.hpp"
 #include "env/IO.hpp"
+#include "env/j9method.h"
 #include "env/jittypes.h"
+#include "env/PersistentCHTable.hpp"
+#include "env/VMJ9.h"
 #include "il/Block.hpp"
 #include "il/DataTypes.hpp"
 #include "il/Node.hpp"
@@ -62,8 +64,7 @@
 #include "il/TreeTop.hpp"
 #include "il/TreeTop_inlines.hpp"
 #include "infra/SimpleRegex.hpp"
-#include "env/j9method.h"
-#include "env/VMJ9.h"
+#include "OMR/Bytes.hpp"
 #include "x/codegen/AllocPrefetchSnippet.hpp"
 #include "x/codegen/CheckFailureSnippet.hpp"
 #include "x/codegen/CompareAnalyser.hpp"
@@ -133,7 +134,8 @@ inline void generateLoadJ9Class(TR::Node* node, TR::Register* j9class, TR::Regis
          {
          case TR::monent:
          case TR::monexit:
-            TR_ASSERT_FATAL(TR::Compiler->om.areValueTypesEnabled(), "monent and monexit are expected for generateLoadJ9Class only when value type is enabled");
+            TR_ASSERT_FATAL(TR::Compiler->om.areValueTypesEnabled() || TR::Compiler->om.areValueBasedMonitorChecksEnabled(),
+                  "monent and monexit are expected for generateLoadJ9Class only when value type or when value based monitor check is enabled");
          case TR::checkcastAndNULLCHK:
             needsNULLCHK = true;
             break;
@@ -1245,18 +1247,14 @@ TR::Register *J9::X86::TreeEvaluator::newEvaluator(TR::Node *node, TR::CodeGener
 
 TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR::CodeGenerator *cg)
    {
-   static char *useDirectHelperCall = feGetEnv("TR_MultiANewArrayEvaluatorUseDirectCall");
-
    TR::Node *firstChild = node->getFirstChild();
    TR::Node *secondChild = node->getSecondChild();
    TR::Node *thirdChild = node->getThirdChild();
 
-   if (useDirectHelperCall || !secondChild->getOpCode().isLoadConst() || secondChild->getInt()!=2)
-      return TR::TreeEvaluator::performHelperCall(node, NULL, TR::acall, true, cg);
-
    // 2-dimensional MultiANewArray
    TR::Compilation *comp = cg->comp();
-   TR_J9VMBase *fej9 = (TR_J9VMBase *)(comp->fe());
+   TR_ASSERT_FATAL(comp->target().is64Bit(), "multianewArrayEvaluator is only supported on 64-bit JVMs!");
+   TR_J9VMBase *fej9 = static_cast<TR_J9VMBase *>(comp->fe());
 
    TR::Register *dimsPtrReg       = NULL;
    TR::Register *dimReg      = NULL;
@@ -1285,12 +1283,13 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
    startLabel->setStartInternalControlFlow();
    fallThru->setEndInternalControlFlow();
 
-   TR::LabelSymbol *failLabel = generateLabelSymbol(cg);
+   TR::LabelSymbol *oolFailLabel = generateLabelSymbol(cg);
+   TR::LabelSymbol *oolJumpPoint = generateLabelSymbol(cg);
 
    generateLabelInstruction(LABEL, node, startLabel, cg);
 
    // Generate the heap allocation, and the snippet that will handle heap overflow.
-   TR_OutlinedInstructions *outlinedHelperCall = new (cg->trHeapMemory()) TR_OutlinedInstructions(node, TR::acall, targetReg, failLabel, fallThru, cg);
+   TR_OutlinedInstructions *outlinedHelperCall = new (cg->trHeapMemory()) TR_OutlinedInstructions(node, TR::acall, targetReg, oolFailLabel, fallThru, cg);
    cg->getOutlinedInstructionsList().push_front(outlinedHelperCall);
 
    dimReg = cg->evaluate(secondChild);
@@ -1301,12 +1300,15 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
 
    generateRegMemInstruction(L4RegMem, node, secondDimLenReg,
                              generateX86MemoryReference(dimsPtrReg, 0, cg), cg);
-   generateRegMemInstruction(L4RegMem, node, firstDimLenReg,
+   // Load the 32-bit length value as a 64-bit value so that the top half of the register
+   // can be zeroed out. This will allow us to treat the value as 64-bit when performing
+   // calculations later on.
+   generateRegMemInstruction(MOVSXReg8Mem4, node, firstDimLenReg,
                              generateX86MemoryReference(dimsPtrReg, 4, cg), cg);
 
    generateRegImmInstruction(CMP4RegImm4, node, secondDimLenReg, 0, cg);
 
-   generateLabelInstruction(JNE4, node, failLabel, cg);
+   generateLabelInstruction(JNE4, node, oolJumpPoint, cg);
    // Second Dim length is 0
 
    generateRegImmInstruction(CMP4RegImm4, node, firstDimLenReg, 0, cg);
@@ -1317,7 +1319,7 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
    generateRegMemInstruction(LRegMem(), node, targetReg, generateX86MemoryReference(vmThreadReg, offsetof(J9VMThread, heapAlloc), cg), cg);
    generateRegMemInstruction(LEARegMem(), node, temp1Reg, generateX86MemoryReference(targetReg, zeroArraySize, cg), cg);
    generateRegMemInstruction(CMPRegMem(), node, temp1Reg, generateX86MemoryReference(vmThreadReg, offsetof(J9VMThread, heapTop), cg), cg);
-   generateLabelInstruction(JA4, node, failLabel, cg);
+   generateLabelInstruction(JA4, node, oolJumpPoint, cg);
    generateMemRegInstruction(SMemReg(), node, generateX86MemoryReference(vmThreadReg, offsetof(J9VMThread, heapAlloc), cg), temp1Reg, cg);
 
    // Init class
@@ -1336,46 +1338,32 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
    generateRegMemInstruction(LRegMem(), node, componentClassReg,
              generateX86MemoryReference(classReg, offsetof(J9ArrayClass, componentType), cg), cg);
 
-   int32_t elementSize;
-
-   if (comp->useCompressedPointers())
-      elementSize = TR::Compiler->om.sizeofReferenceField();
-   else
-      elementSize = (int32_t)(TR::Compiler->om.sizeofReferenceAddress());
+   int32_t elementSize = TR::Compiler->om.sizeofReferenceField();
 
    uintptr_t maxObjectSize = cg->getMaxObjectSizeGuaranteedNotToOverflow();
    uintptr_t maxObjectSizeInElements = maxObjectSize / elementSize;
-
-   if (comp->target().is64Bit() && !(maxObjectSizeInElements > 0 && maxObjectSizeInElements <= (uintptr_t)INT_MAX))
-      {
-      generateRegImm64Instruction(MOV8RegImm64, node, temp1Reg, maxObjectSizeInElements, cg);
-      generateRegRegInstruction(CMP8RegReg, node, firstDimLenReg, temp1Reg, cg);
-      }
-   else
-      {
-      generateRegImmInstruction(CMPRegImm4(), node, firstDimLenReg, (int32_t)maxObjectSizeInElements, cg);
-      }
+   generateRegImmInstruction(CMPRegImm4(), node, firstDimLenReg, static_cast<int32_t>(maxObjectSizeInElements), cg);
 
    // Must be an unsigned comparison on sizes.
-   generateLabelInstruction(JAE4, node, failLabel, cg);
+   generateLabelInstruction(JAE4, node, oolJumpPoint, cg);
 
    generateRegRegInstruction(MOVRegReg(), node, temp1Reg, firstDimLenReg, cg);
 
-   int32_t round = (elementSize >= TR::Compiler->om.objectAlignmentInBytes())? 0 : TR::Compiler->om.objectAlignmentInBytes();
-   int32_t disp32 = round ? (round-1) : 0;
+   int32_t elementSizeAligned = OMR::align(elementSize, TR::Compiler->om.objectAlignmentInBytes());
+   int32_t alignmentCompensation = (elementSize == elementSizeAligned) ? 0 : elementSizeAligned - 1;
 
-   uint8_t shiftVal = TR::MemoryReference::convertMultiplierToStride(elementSize);
-   generateRegImmInstruction(SHLRegImm1(), node, temp1Reg, shiftVal, cg);
-   generateRegImmInstruction(ADDRegImm4(), node, temp1Reg, TR::Compiler->om.contiguousArrayHeaderSizeInBytes()+disp32, cg);
+   TR_ASSERT_FATAL(elementSize <= 8, "multianewArrayEvaluator - elementSize cannot be greater than 8!");
+   generateRegImmInstruction(SHLRegImm1(), node, temp1Reg, TR::MemoryReference::convertMultiplierToStride(elementSize), cg);
+   generateRegImmInstruction(ADDRegImm4(), node, temp1Reg, TR::Compiler->om.contiguousArrayHeaderSizeInBytes()+alignmentCompensation, cg);
 
-   if (round)
+   if (alignmentCompensation != 0)
       {
-      generateRegImmInstruction(ANDRegImm4(), node, temp1Reg, -round, cg);
+      generateRegImmInstruction(ANDRegImm4(), node, temp1Reg, -elementSizeAligned, cg);
       }
 
    // temp2Reg = firstDimLenReg * 16 (discontiguousArrayHeaderSizeInBytes)
-   generateRegRegInstruction(MOVRegReg(),  node, temp2Reg, firstDimLenReg, cg);
-   generateRegImmInstruction(SHLRegImm1(), node, temp2Reg, 4, cg);
+   TR_ASSERT_FATAL(zeroArraySize >= 0 && zeroArraySize <= 127, "discontiguousArrayHeaderSizeInBytes cannot be > 127 for IMulRegRegImms instruction");
+   generateRegRegImmInstruction(IMULRegRegImm4(), node, temp2Reg, firstDimLenReg, zeroArraySize, cg);
 
    // temp2Reg = temp2Reg + temp1Reg
    generateRegRegInstruction(ADDRegReg(), node, temp2Reg, temp1Reg, cg);
@@ -1385,7 +1373,7 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
    generateRegRegInstruction(ADDRegReg(), node, temp2Reg, targetReg, cg);
 
    generateRegMemInstruction(CMPRegMem(), node, temp2Reg, generateX86MemoryReference(vmThreadReg, offsetof(J9VMThread, heapTop), cg), cg);
-   generateLabelInstruction(JA4, node, failLabel, cg);
+   generateLabelInstruction(JA4, node, oolJumpPoint, cg);
    generateMemRegInstruction(SMemReg(), node, generateX86MemoryReference(vmThreadReg, offsetof(J9VMThread, heapAlloc), cg), temp2Reg, cg);
 
    //init 1st dim array class field
@@ -1399,13 +1387,6 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
    // temp1 points to 1st dim array past header
    generateRegMemInstruction(LEARegMem(), node, temp1Reg, generateX86MemoryReference(targetReg, TR::Compiler->om.contiguousArrayHeaderSizeInBytes(), cg), cg);
 
-
-   uintptr_t heapBase = TR::Compiler->vm.heapBaseAddress();
-   bool useRegForHeapBase = comp->target().is64Bit() && comp->useCompressedPointers() &&
-                           (heapBase != 0) && (!IS_32BIT_SIGNED(heapBase) || TR::Compiler->om.nativeAddressesCanChangeSize());
-   if (useRegForHeapBase)
-      generateRegImm64Instruction(MOV8RegImm64, node, secondDimLenReg, heapBase, cg);
-
    //loop start
    generateLabelInstruction(LABEL, node, loopLabel, cg);
    // Init 2nd dim element's class
@@ -1418,17 +1399,6 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
       {
       int32_t shiftAmount = TR::Compiler->om.compressedReferenceShift();
       generateRegRegInstruction(MOVRegReg(), node, temp3Reg, temp2Reg, cg);
-      if (heapBase != 0)
-         {
-         if (useRegForHeapBase)
-            {
-            generateRegRegInstruction(SUBRegReg(), node, temp3Reg, secondDimLenReg, cg);
-            }
-         else
-            {
-            generateRegImmInstruction(SUBRegImm4(), node, temp3Reg, (int32_t)heapBase, cg);
-            }
-         }
       if (shiftAmount != 0)
          {
          generateRegImmInstruction(SHRRegImm1(), node, temp3Reg, shiftAmount, cg);
@@ -1446,6 +1416,7 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
 
    generateRegInstruction(DEC4Reg, node, firstDimLenReg, cg);
    generateLabelInstruction(JA4, node, loopLabel, cg);
+   generateLabelInstruction(JMP4, node, fallThru, cg);
 
    TR::RegisterDependencyConditions  *deps = generateRegisterDependencyConditions((uint8_t)0, 13, cg);
 
@@ -1479,6 +1450,9 @@ TR::Register *J9::X86::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR
          deps->unionPostCondition(reg, TR::RealRegister::NoReg, cg);
 
    deps->stopAddingConditions();
+
+   generateLabelInstruction(LABEL, node, oolJumpPoint, cg);
+   generateLabelInstruction(JMP4, node, oolFailLabel, cg);
 
    generateLabelInstruction(LABEL, node, fallThru, deps, cg);
 
@@ -4482,21 +4456,26 @@ void J9::X86::TreeEvaluator::transactionalMemoryJITMonitorEntry(TR::Node        
    }
 
 void
-J9::X86::TreeEvaluator::generateCheckForValueTypeMonitorEnterOrExit(
+J9::X86::TreeEvaluator::generateCheckForValueMonitorEnterOrExit(
       TR::Node *node,
+      int32_t classFlag,
       TR::LabelSymbol *snippetLabel,
       TR::CodeGenerator *cg)
    {
-   if (cg->isMonitorValueType(node) != TR_maybe)
-      return;
    TR::Register *objectReg = cg->evaluate(node->getFirstChild());
    TR::Register *j9classReg = cg->allocateRegister();
    generateLoadJ9Class(node, j9classReg, objectReg, cg);
    auto fej9 = (TR_J9VMBase *)(cg->fe());
    TR::MemoryReference *classFlagsMR = generateX86MemoryReference(j9classReg, (uintptr_t)(fej9->getOffsetOfClassFlags()), cg);
-   static_assert((uint32_t) J9ClassIsValueType < USHRT_MAX, "Expecting J9ClassIsValueType to be less than 16 bits for use in test instruction");
-   //test [j9classReg.classFlags], J9ClassIsValueType
-   generateMemImmInstruction(TEST2MemImm2, node, classFlagsMR, J9ClassIsValueType, cg);
+
+   //test [j9classReg.classFlags], J9ClassIsValueType or J9ClassIsValueBased
+   TR_X86OpCodes testOpCode;
+   if ((uint32_t)classFlag <= USHRT_MAX)
+      testOpCode = TEST2MemImm2;
+   else
+      testOpCode = TEST4MemImm4;
+
+   generateMemImmInstruction(testOpCode, node, classFlagsMR, classFlag, cg);
    generateLabelInstruction(JNE4, node, snippetLabel, cg);
    }
 
@@ -4525,7 +4504,8 @@ J9::X86::TreeEvaluator::VMmonentEvaluator(
    if (comp->getOption(TR_MimicInterpreterFrameShape) ||
        (comp->getOption(TR_FullSpeedDebug) && node->isSyncMethodMonitor()) ||
        noInline ||
-       TR::Compiler->om.areValueTypesEnabled() && cg->isMonitorValueType(node) == TR_yes ||
+       ((TR::Compiler->om.areValueTypesEnabled() || TR::Compiler->om.areValueBasedMonitorChecksEnabled()) &&
+        (cg->isMonitorValueBasedOrValueType(node) == TR_yes)) ||
        comp->getOption(TR_DisableInlineMonEnt) ||
        (firstMonEnt && (*firstMonEnt-'0') > monEntCount++))
       {
@@ -4590,8 +4570,11 @@ J9::X86::TreeEvaluator::VMmonentEvaluator(
    TR::SymbolReference *originalNodeSymRef = NULL;
 
    TR::Node *helperCallNode = node;
-   if (TR::Compiler->om.areValueTypesEnabled())
-      TR::TreeEvaluator::generateCheckForValueTypeMonitorEnterOrExit(node, snippetLabel, cg);
+
+   if ((TR::Compiler->om.areValueTypesEnabled() || TR::Compiler->om.areValueBasedMonitorChecksEnabled())
+      && (cg->isMonitorValueBasedOrValueType(node) == TR_maybe))
+      TR::TreeEvaluator::generateCheckForValueMonitorEnterOrExit(node, J9_CLASS_DISALLOWS_LOCKING_FLAGS, snippetLabel, cg);
+
    if (comp->getOption(TR_ReservingLocks))
       {
       // About to change the node's symref... store the original.
@@ -5143,7 +5126,8 @@ TR::Register
 
    if ((comp->getOption(TR_MimicInterpreterFrameShape) /*&& !comp->getOption(TR_EnableLiveMonitorMetadata)*/) ||
        noInline ||
-       TR::Compiler->om.areValueTypesEnabled() && cg->isMonitorValueType(node) == TR_yes ||
+       ((TR::Compiler->om.areValueTypesEnabled() || TR::Compiler->om.areValueBasedMonitorChecksEnabled()) &&
+        (cg->isMonitorValueBasedOrValueType(node) == TR_yes)) ||
        comp->getOption(TR_DisableInlineMonExit) ||
        (firstMonExit && (*firstMonExit-'0') > monExitCount++))
       {
@@ -5193,8 +5177,11 @@ TR::Register
    TR::LabelSymbol *fallThru   = generateLabelSymbol(cg);
    // Create the monitor exit snippet
    TR::LabelSymbol *snippetLabel = generateLabelSymbol(cg);
-   if (TR::Compiler->om.areValueTypesEnabled())
-       TR::TreeEvaluator::generateCheckForValueTypeMonitorEnterOrExit(node, snippetLabel, cg);
+
+   if ((TR::Compiler->om.areValueTypesEnabled() || TR::Compiler->om.areValueBasedMonitorChecksEnabled())
+      && (cg->isMonitorValueBasedOrValueType(node) == TR_maybe))
+      TR::TreeEvaluator::generateCheckForValueMonitorEnterOrExit(node, J9_CLASS_DISALLOWS_LOCKING_FLAGS, snippetLabel, cg);
+
 #if !defined(J9VM_OPT_REAL_TIME_LOCKING_SUPPORT)
    // Now that the object reference has been generated, see if this is the end
    // of a small synchronized block.
@@ -7372,7 +7359,7 @@ static bool genZeroInitObject(
 
       // We just pushed targetReg on the stack and zeroed it out. targetReg contained the address of the
       // beginning of the header. We want to use the 0-reg to initialize the monitor slot, so we use
-      // segmentReg, which points to to targetReg+startOfZeroInits and subtract the extra offset.
+      // segmentReg, which points to targetReg+startOfZeroInits and subtract the extra offset.
 
       bool initLw = (node->getOpCodeValue() != TR::New);
       int lwOffset = fej9->getByteOffsetToLockword(clazz);

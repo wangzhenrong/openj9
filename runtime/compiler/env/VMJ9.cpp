@@ -4054,7 +4054,7 @@ TR_J9VMBase::canDereferenceAtCompileTimeWithFieldSymbol(TR::Symbol * fieldSymbol
          // Sadly, it's common for deserialization-like code to strip final
          // specifiers off instance fields so they can be filled in during
          // deserialization.  To support these shenanigans, we must restrict
-         // ourselves to fold instance fields only in classes classes where
+         // ourselves to fold instance fields only in classes where
          // this is known to be safe.
 
          const char* name;
@@ -5154,7 +5154,7 @@ TR_J9VMBase::reportILGeneratorPhase()
 
    enum { DEFAULT_LOW_BYTE=0x80 };
 
-   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT_CODEGEN | (DEFAULT_LOW_BYTE & 0xFF);
+   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT | (DEFAULT_LOW_BYTE & 0xFF);
    }
 
 void
@@ -5163,7 +5163,7 @@ TR_J9VMBase::reportOptimizationPhase(OMR::Optimizations opts)
    if (!_vmThread)
       return;
 
-   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT_CODEGEN | ((((int32_t) opts & 0xFF) << 8)|0xFF);
+   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT_OPTIMIZER | ((static_cast<int32_t>(opts) & 0xFF) << 8);
    }
 
 void
@@ -5192,7 +5192,7 @@ TR_J9VMBase::reportCodeGeneratorPhase(TR::CodeGenPhase::PhaseValue phase)
    if (!_vmThread)
       return;
 
-   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT_CODEGEN | phase | 0xFF00;
+   vmThread()->omrVMThread->vmState = J9VMSTATE_JIT_CODEGEN | phase;
 
    if (TrcEnabled_Trc_JIT_codeGeneratorPhase)
       Trc_JIT_codeGeneratorPhase(vmThread(), TR::CodeGenPhase::getName(phase));
@@ -5331,7 +5331,7 @@ TR_J9VMBase::reserveTrampolineIfNecessary(TR::Compilation * comp, TR::SymbolRefe
          }
 #endif
 
-      // AOT compiles create a relocation at the snippet do do the trampoline reservation
+      // AOT compiles create a relocation at the snippet to do the trampoline reservation
       // would be better to implement this code via a virtual function that's empty for TR_J9SharedCacheVM
       if (!isAOT_DEPRECATED_DO_NOT_USE())
          {

@@ -1,6 +1,6 @@
 /*[INCLUDE-IF Sidecar19-SE & !OPENJDK_METHODHANDLES]*/
 /*******************************************************************************
- * Copyright (c) 2017, 2020 IBM Corp. and others
+ * Copyright (c) 2017, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -360,9 +360,6 @@ public abstract class VarHandle extends VarHandleInternal
 	final Class<?> fieldType;
 	final Class<?>[] coordinateTypes;
 	final int modifiers;
-/*[IF JAVA_SPEC_VERSION >= 12]*/
-	private int hashCode = 0;
-/*[ENDIF] JAVA_SPEC_VERSION >= 12 */
 
 /*[IF JAVA_SPEC_VERSION >= 16]*/
 	final boolean exact;
@@ -695,72 +692,6 @@ public abstract class VarHandle extends VarHandleInternal
 	}
 
 	/**
-	 * Compares the specified object to this VarHandle and answer if they are equal.
-	 *
-	 * @param obj the object to compare
-	 * @return true if the specified object is equal to this VarHandle, false otherwise
-	 */
-	@Override
-	public boolean equals(Object obj) {
-		if (this == obj) {
-			return true;
-		}
-
-		if (!(obj instanceof VarHandle)) {
-			return false;
-		}
-
-		/* argument comparison */
-		VarHandle that = (VarHandle)obj;
-		if (!(this.fieldType.equals(that.fieldType) 
-			&& (this.modifiers == that.modifiers)
-			&& Arrays.equals(this.coordinateTypes, that.coordinateTypes))
-		) {
-			return false;
-		}
-
-		/* Compare properties of FieldVarHandle that are not captured in the parent class */
-		if (obj instanceof FieldVarHandle) {
-			if (!(this instanceof FieldVarHandle)) {
-				return false;
-			}
-
-			FieldVarHandle thisf = (FieldVarHandle)this;
-			FieldVarHandle thatf = (FieldVarHandle)obj;
-			if (!(thisf.definingClass.equals(thatf.definingClass)
-				&& thisf.fieldName.equals(thatf.fieldName))
-			) {
-				return false;
-			}
-			
-		}
-
-		return true;
-	}
-
-	/**
-	 * Answers an integer hash code for the VarHandle. VarHandle instances
-	 * which are equal answer the same value for this method.
-	 *
-	 * @return a hash for this VarHandle
-	 */
-	@Override
-	public int hashCode() {
-		if (hashCode == 0) {
-			hashCode = fieldType.hashCode();
-			for (Class<?> c : coordinateTypes) {
-				hashCode = 31 * hashCode + c.hashCode();
-			}
-
-			/* Add properties for FieldVarHandle */
-			if (this instanceof FieldVarHandle) {
-				hashCode = 31 * hashCode + ((FieldVarHandle)this).definingClass.hashCode();
-			}
-		}
-		return hashCode;
-	}
-
-	/**
 	 * Returns a text representation of the VarHandle instance.
 	 * 
 	 * @return String representation of VarHandle instance
@@ -862,7 +793,7 @@ public abstract class VarHandle extends VarHandleInternal
 	/**
 	 * Not all AccessMode are supported for all {@link VarHandle} instances, e.g. 
 	 * because of the field type and/or field modifiers. This method indicates whether 
-	 * a specific {@link AccessMode} is supported by by this {@link VarHandle} instance.
+	 * a specific {@link AccessMode} is supported by this {@link VarHandle} instance.
 	 * 
 	 * @param accessMode The {@link AccessMode} to check support for.
 	 * @return A boolean value indicating whether the {@link AccessMode} is supported.
